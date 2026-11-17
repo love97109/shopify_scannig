@@ -677,13 +677,10 @@
     const GAS_API_URL = 'https://script.google.com/macros/s/AKfycbxfzN0P4Up9gS9CmNW9lwylnQzJ7usU4WCCzcJW-UajCeUbUyOZm5aFR1sp3NVrVTCl/exec';
 
     /* ===== 2. 獨立出貨暫存庫 Apps Script 網址 ===== */
-    const BATCH_GAS_URL = 'https://script.google.com/macros/s/AKfycbxQ7eWzVPfViCmQ2qvYyf1A4X8nc5wDbZxR91thfrKvJysgD5OcmPa8PTj8Zai5vL3z/exec';
+    const BATCH_GAS_URL = 'https://script.google.com/macros/s/AKfycbykIfjUgUiKmAfxIUjCYds8eh45WNxYhn51DesBqw1_JVWYUJHsE3Lax6bq_OdImpUX/exec';
 
-    /* ===== 3. 自訂專屬掃碼音效檔設定（放在與 pack.html 同一資料夾即可所有手機共用） ===== */
-    const CUSTOM_SOUNDS = {
-      success: '64答對3.mp3?v=2',        // 掃描正確
-      error: '65答錯.mp3?v=2',           // 掃描失敗 / 拿錯 / 數量已滿
-      complete: '68小朋友歡呼聲.mp3?v=2' // 整筆訂單完成
+    /* ===== 3. 自訂專屬掃碼音效檔設定（已清空，全部使用系統預設電子音效） ===== */
+    const CUSTOM_SOUNDS = {};
     };
 
     const preloadedAudioMap = {};

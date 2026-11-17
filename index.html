@@ -632,8 +632,8 @@
             </div>
             <p id="pack-customer-info" class="text-[30px] leading-tight font-bold text-slate-800 mt-2 font-mono break-all">-</p>
           </div>
-          <div id="pack-box-badges" class="flex flex-col items-end gap-1 shrink-0">
-            <!-- 動態顯示建議包裝盒與內襯 -->
+          <div id="pack-box-badges" class="flex w-[142px] sm:w-[205px] flex-col items-stretch gap-2 shrink-0">
+            <!-- 動態顯示大型包材與外箱提示 -->
           </div>
         </div>
         <div id="pack-adjustment-alert" class="hidden bg-amber-50 border border-amber-300 text-amber-900 text-xs p-2 rounded-lg font-medium"></div>
@@ -670,8 +670,11 @@
 
       <!-- 7. 底部操作按鈕 -->
       <div class="pt-2 pb-6 flex gap-2">
-        <button id="pack-next-btn" onclick="goToNextUnfinishedOrder()" class="w-full py-3.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-sm rounded-xl shadow-md transition-all">
-          暫存缺件 / 跳至下一筆未完成訂單 →
+        <button id="pack-prev-btn" onclick="goToPreviousOrder()" class="flex-1 py-3.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-sm rounded-xl border border-slate-300 shadow-sm transition-all">
+          ← 上一筆
+        </button>
+        <button id="pack-next-btn" onclick="goToNextOrder()" class="flex-1 py-3.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-sm rounded-xl shadow-md transition-all">
+          下一筆 →
         </button>
       </div>
 
@@ -2266,13 +2269,13 @@
       const boxBadgesEl = document.getElementById('pack-box-badges');
       boxBadgesEl.innerHTML = '';
       currentOrder.pkg.boxes.forEach((q, name) => {
-        boxBadgesEl.innerHTML += `<span class="text-xs font-bold bg-amber-100 text-amber-900 border border-amber-300 px-2 py-0.5 rounded">📦 盒：${escapeHtml(name)} ×${q}</span>`;
+        boxBadgesEl.innerHTML += `<span class="w-full whitespace-nowrap rounded-xl border border-amber-300 bg-amber-100 px-2.5 py-2 text-center text-[18px] font-black leading-none text-amber-900 shadow-sm sm:px-3 sm:py-2.5 sm:text-[23px]">盒：${escapeHtml(name)} ×${q}</span>`;
       });
       currentOrder.pkg.linings.forEach((q, name) => {
-        boxBadgesEl.innerHTML += `<span class="text-xs font-bold bg-indigo-50 text-indigo-800 border border-indigo-200 px-2 py-0.5 rounded">🧩 襯：${escapeHtml(name)} ×${q}</span>`;
+        boxBadgesEl.innerHTML += `<span class="w-full whitespace-nowrap rounded-xl border border-indigo-200 bg-indigo-50 px-2.5 py-2 text-center text-[18px] font-black leading-none text-indigo-800 shadow-sm sm:px-3 sm:py-2.5 sm:text-[23px]">襯：${escapeHtml(name)} ×${q}</span>`;
       });
       if (currentOrder.packing?.status === 'recommended') {
-        boxBadgesEl.innerHTML += `<span class="text-xs font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded">🚚 外箱：${escapeHtml(currentOrder.packing.box.code)}</span>`;
+        boxBadgesEl.innerHTML += `<span class="w-full whitespace-nowrap rounded-xl border border-emerald-200 bg-emerald-50 px-2.5 py-2 text-center text-[18px] font-black leading-none text-emerald-800 shadow-sm sm:px-3 sm:py-2.5 sm:text-[23px]">外箱：${escapeHtml(currentOrder.packing.box.code)}</span>`;
       }
 
       const adjAlert = document.getElementById('pack-adjustment-alert');
@@ -2333,16 +2336,10 @@
       document.getElementById('pack-order-progress').textContent = `${totalScanned} / ${totalNeeded} 件`;
 
       const banner = document.getElementById('pack-status-banner');
-      const nextBtn = document.getElementById('pack-next-btn');
 
       if (totalNeeded > 0 && totalScanned >= totalNeeded) {
         banner.className = 'p-3.5 rounded-xl text-center font-bold text-base bg-emerald-600 text-white shadow-md';
         banner.textContent = '🎉 本單核對完成！請封箱並貼上寄件單';
-        nextBtn.className = 'w-full py-3.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm rounded-xl shadow-md transition-all';
-        nextBtn.textContent = '✅ 完成，進入下一筆未包裝訂單 →';
-      } else {
-        nextBtn.className = 'w-full py-3.5 bg-slate-900 hover:bg-slate-800 text-white font-bold text-sm rounded-xl shadow-md transition-all';
-        nextBtn.textContent = '⏳ 暫存缺件 / 跳至下一筆未完成訂單 →';
       }
     }
 
@@ -2354,19 +2351,16 @@
       renderPackWorkspace();
     }
 
-    function goToNextUnfinishedOrder() {
+    function goToPreviousOrder() {
       if (packOrdersList.length === 0) return;
-      for (let offset = 1; offset <= packOrdersList.length; offset++) {
-        const candidateIdx = (currentPackOrderIdx + offset) % packOrdersList.length;
-        const ord = packOrdersList[candidateIdx];
-        const isDone = ord.items.every(i => i.scanned >= i.qty);
-        if (!isDone) {
-          selectPackOrder(candidateIdx);
-          return;
-        }
-      }
-      playFeedbackTone('complete');
-      alert('🎉 太棒了！所有訂單都已經全數核對包裝完成！');
+      const previousIdx = (currentPackOrderIdx - 1 + packOrdersList.length) % packOrdersList.length;
+      selectPackOrder(previousIdx);
+    }
+
+    function goToNextOrder() {
+      if (packOrdersList.length === 0) return;
+      const nextIdx = (currentPackOrderIdx + 1) % packOrdersList.length;
+      selectPackOrder(nextIdx);
     }
 
     function manualIncrementItem(itemIdx) {

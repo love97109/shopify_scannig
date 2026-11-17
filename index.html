@@ -477,6 +477,28 @@
         </div>
       </aside>
 
+      <!-- Smart outer-carton recommendations; kept separate from existing product box statistics. -->
+      <section id="smart-packing-section" class="no-print jp-card p-5 bg-white hidden">
+        <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 border-b border-slate-200 pb-3 mb-4">
+          <div>
+            <h3 class="text-base font-bold text-slate-900 flex items-center gap-2">📦 智慧裝箱與外箱需求</h3>
+            <p class="text-xs text-slate-500 mt-1">使用價格表「牛皮盒尺寸」與外箱尺寸表的內尺寸計算；每筆訂單只推薦一個外箱。</p>
+          </div>
+          <span id="smart-packing-source" class="text-[11px] font-mono px-2.5 py-1 rounded bg-slate-100 text-slate-600">等待外箱資料</span>
+        </div>
+        <div id="smart-packing-summary" class="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4"></div>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div>
+            <h4 class="text-xs font-bold text-slate-700 mb-2">外箱需求統計</h4>
+            <div id="smart-packing-box-counts" class="border border-slate-200 rounded-lg divide-y divide-slate-100"></div>
+          </div>
+          <div>
+            <h4 class="text-xs font-bold text-slate-700 mb-2">需處理訂單</h4>
+            <div id="smart-packing-exceptions" class="border border-slate-200 rounded-lg divide-y divide-slate-100"></div>
+          </div>
+        </div>
+      </section>
+
       <!-- Print Header for Standard A4 print -->
       <div class="print-only mb-6 border-b-2 border-black pb-4">
         <h1 class="text-2xl font-bold text-black tracking-tight">訂單彙整與出貨明細報告</h1>
@@ -725,6 +747,9 @@
     let modelToDetailMap = new Map();
     let detailOrderMap = new Map();
     let detailExtraInfoMap = new Map();
+    let modelPackagingMap = new Map();
+    let outerBoxes = [];
+    let lastPackingResults = new Map();
 
     let isMappingLoaded = false;
     let rawExcelRows = [];
@@ -740,11 +765,13 @@
     let isSyncingCloud = false;
     let pendingCloudSync = false;
 
-    // 鏡頭與防誤觸（3秒全局冷卻 + 移開鏡頭雙重鎖定）狀態變數
-    const SCAN_COOLDOWN_MS = 3000;   // 每 3 秒只能掃描一件
+    // 鏡頭與防誤觸：同一條碼停留在畫面中只算一次；移開後才可再掃同型號。
+    // 不同條碼只保留極短間隔，讓逐件掃描不必等待數秒。
+    const DIFFERENT_CODE_GAP_MS = 250;
+    const SAME_CODE_ABSENCE_MS = 500;
     let html5QrCodeInstance = null;
     let isScannerRunning = false;
-    let scanCooldownUntil = 0;       // 冷卻解除的時間戳記
+    let scanCooldownUntil = 0;       // 不同條碼可再次接受的時間戳記
     let cooldownCountdownTimer = null;
     let activeHeldCode = '';         // 目前停留在鏡頭前已掃過的條碼（未移開前鎖定）
     let clearAbsenceTimer = null;    // 偵測條碼已離開鏡頭的解鎖計時器
@@ -905,6 +932,7 @@
         phone: maskPhoneLastThree(ord.phone),
         address: maskRecipientAddress(ord.address),
         adjustment: ord.adjustment ? { status: ord.adjustment.status } : null,
+        packing: ord.packing || null,
         pkg: {
           boxes: Object.fromEntries(ord.pkg?.boxes || []),
           linings: Object.fromEntries(ord.pkg?.linings || [])
@@ -1266,12 +1294,14 @@
           if (!response.ok) throw new Error('API 傳回異常狀態');
           return response.json();
         })
-        .then(rows => {
-          if (rows && rows.length > 0) {
-            processMappingRows(rows);
+        .then(payload => {
+          const data = normalizeMappingPayload(payload);
+          if (data.priceRows.length > 0) {
+            processMappingRows(data.priceRows);
+            processOuterBoxRows(data.outerBoxRows);
             isMappingLoaded = true;
             try { 
-              localStorage.setItem('cached_mapping_rows', JSON.stringify(rows)); 
+              localStorage.setItem('cached_mapping_rows', JSON.stringify(data)); 
             } catch (e) {}
             
             updateSyncUI('success', `對應表就緒 (${modelToDetailMap.size})`);
@@ -1294,9 +1324,10 @@
       const cachedData = localStorage.getItem('cached_mapping_rows');
       if (cachedData) {
         try {
-          const rows = JSON.parse(cachedData);
-          if (rows && rows.length > 0) {
-            processMappingRows(rows);
+          const data = normalizeMappingPayload(JSON.parse(cachedData));
+          if (data.priceRows.length > 0) {
+            processMappingRows(data.priceRows);
+            processOuterBoxRows(data.outerBoxRows);
             isMappingLoaded = true;
             updateSyncUI('warning', `離線快取 (${modelToDetailMap.size})`);
             showToast(`已自動載入本地快取對應表 (${modelToDetailMap.size} 筆)`, 'info');
@@ -1340,10 +1371,20 @@
         .toUpperCase();
     }
 
+    function normalizeMappingPayload(payload) {
+      // Backward-compatible with the former API, which returned the price table array directly.
+      if (Array.isArray(payload)) return { priceRows: payload, outerBoxRows: [] };
+      return {
+        priceRows: Array.isArray(payload?.priceRows) ? payload.priceRows : [],
+        outerBoxRows: Array.isArray(payload?.outerBoxRows) ? payload.outerBoxRows : []
+      };
+    }
+
     function processMappingRows(rows) {
       modelToDetailMap.clear();
       detailOrderMap.clear();
       detailExtraInfoMap.clear();
+      modelPackagingMap.clear();
 
       if (!rows || rows.length < 1) return;
 
@@ -1351,6 +1392,8 @@
       let detailColIdx = -1;
       let liningColIdx = -1; 
       let boxColIdx = -1;
+      let packageSizeColIdx = -1;
+      let categoryColIdx = -1;
 
       for (let i = 0; i < Math.min(10, rows.length); i++) {
         const r = rows[i];
@@ -1361,6 +1404,8 @@
           if (val.includes('細目')) detailColIdx = idx;
           if (val.includes('內襯')) liningColIdx = idx;
           if (val.includes('包裝盒')) boxColIdx = idx;
+          if (val.includes('牛皮盒尺寸') || val.includes('包裝尺寸')) packageSizeColIdx = idx;
+          if (val === '大類' || val.includes('商品類別')) categoryColIdx = idx;
         });
       }
 
@@ -1370,12 +1415,28 @@
       if (boxColIdx === -1) boxColIdx = 10;
 
       let orderSequence = 0;
+      let lastCategory = '';
 
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
         if (!row) continue;
         const modelVal = cleanStr(row[modelColIdx]);
         const detailVal = cleanStr(row[detailColIdx]);
+
+        if (categoryColIdx !== -1 && cleanStr(row[categoryColIdx])) {
+          lastCategory = cleanStr(row[categoryColIdx]);
+        }
+
+        if (modelVal && !modelVal.includes('型號')) {
+          const dimensions = parseDimensions(row[packageSizeColIdx]);
+          if (dimensions) {
+            const normKey = normalizeKey(modelVal);
+            modelPackagingMap.set(normKey, {
+              ...dimensions,
+              type: /^TK-/i.test(modelVal) || lastCategory.includes('配件') ? 'accessory' : 'cookware'
+            });
+          }
+        }
 
         if (modelVal && detailVal && !modelVal.includes('型號')) {
           const normKey = normalizeKey(modelVal);
@@ -1397,6 +1458,144 @@
           }
         }
       }
+    }
+
+    function processOuterBoxRows(rows) {
+      outerBoxes = [];
+      if (!Array.isArray(rows)) return;
+
+      let codeColIdx = -1;
+      let sizeColIdx = -1;
+      for (let i = 0; i < Math.min(10, rows.length); i++) {
+        (rows[i] || []).forEach((cell, idx) => {
+          const value = cleanStr(cell).replace(/\s+/g, '');
+          if (value.includes('代號') || value.includes('外箱名稱')) codeColIdx = idx;
+          if (value.includes('外箱內尺寸') || value.includes('內尺寸') || value === '尺寸') sizeColIdx = idx;
+        });
+      }
+      if (codeColIdx === -1) codeColIdx = 0;
+      if (sizeColIdx === -1) sizeColIdx = 1;
+
+      rows.forEach(row => {
+        const code = cleanStr(row?.[codeColIdx]);
+        const dimensions = parseDimensions(row?.[sizeColIdx]);
+        if (code && dimensions && !code.includes('代號')) {
+          outerBoxes.push({ code, ...dimensions });
+        }
+      });
+      outerBoxes.sort((a, b) => (a.length * a.width * a.height) - (b.length * b.width * b.height));
+    }
+
+    function parseDimensions(value) {
+      const text = cleanStr(value).normalize('NFKC').replace(/\s+/g, ' ');
+      if (!text) return null;
+      const length = text.match(/(?:長|length|\bL)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/i);
+      const width = text.match(/(?:寬|width|\bW)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/i);
+      const height = text.match(/(?:高|height|\bH)\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?)/i);
+      const values = [length, width, height].map(match => match ? Number(match[1]) : NaN);
+      return values.every(value => Number.isFinite(value) && value > 0)
+        ? { length: values[0], width: values[1], height: values[2] }
+        : null;
+    }
+
+    function getAllowedOrientations(packaging) {
+      const { length, width, height, type } = packaging;
+      const raw = type === 'cookware'
+        ? [[length, width, height], [width, length, height]]
+        : [
+            [length, width, height], [length, height, width],
+            [width, length, height], [width, height, length],
+            [height, length, width], [height, width, length]
+          ];
+      const seen = new Set();
+      return raw.filter(([l, w, h]) => {
+        const key = `${l}|${w}|${h}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      }).map(([length, width, height]) => ({ length, width, height }));
+    }
+
+    function tryPackOrderInBox(items, box) {
+      const expanded = [];
+      items.forEach(item => {
+        const packaging = modelPackagingMap.get(normalizeKey(item.model));
+        for (let i = 0; i < item.qty; i++) expanded.push({ model: item.model, packaging });
+      });
+
+      // Put the least flexible and largest packages first. Cookware keeps its height upright.
+      expanded.sort((a, b) => {
+        const aVolume = a.packaging.length * a.packaging.width * a.packaging.height;
+        const bVolume = b.packaging.length * b.packaging.width * b.packaging.height;
+        if (a.packaging.type !== b.packaging.type) return a.packaging.type === 'cookware' ? -1 : 1;
+        return bVolume - aVolume;
+      });
+
+      const freeSpaces = [{ x: 0, y: 0, z: 0, length: box.length, width: box.width, height: box.height }];
+      for (const item of expanded) {
+        let best = null;
+        freeSpaces.forEach((space, spaceIndex) => {
+          getAllowedOrientations(item.packaging).forEach(orientation => {
+            if (orientation.length <= space.length + 1e-9 && orientation.width <= space.width + 1e-9 && orientation.height <= space.height + 1e-9) {
+              const remainingVolume = (space.length * space.width * space.height) - (orientation.length * orientation.width * orientation.height);
+              const score = remainingVolume + (space.height - orientation.height) * 0.01;
+              if (!best || score < best.score) best = { spaceIndex, space, orientation, score };
+            }
+          });
+        });
+        if (!best) return false;
+
+        freeSpaces.splice(best.spaceIndex, 1);
+        const { space, orientation } = best;
+        const right = { x: space.x + orientation.length, y: space.y, z: space.z, length: space.length - orientation.length, width: space.width, height: space.height };
+        const front = { x: space.x, y: space.y + orientation.width, z: space.z, length: orientation.length, width: space.width - orientation.width, height: space.height };
+        const above = { x: space.x, y: space.y, z: space.z + orientation.height, length: orientation.length, width: orientation.width, height: space.height - orientation.height };
+        [right, front, above].forEach(candidate => {
+          if (candidate.length > 1e-9 && candidate.width > 1e-9 && candidate.height > 1e-9) freeSpaces.push(candidate);
+        });
+      }
+      return true;
+    }
+
+    function analyzeOrdersPacking(ordersMap) {
+      const results = new Map();
+      ordersMap.forEach(order => {
+        const missingModels = order.items
+          .filter(item => !modelPackagingMap.has(normalizeKey(item.model)))
+          .map(item => item.model);
+        if (missingModels.length > 0) {
+          const uniqueMissing = [...new Set(missingModels)];
+          const result = { status: 'missing', missingModels: uniqueMissing, reason: `缺少商品牛皮盒尺寸：${uniqueMissing.join('、')}` };
+          order.packing = result;
+          results.set(order.orderId, result);
+          return;
+        }
+        if (outerBoxes.length === 0) {
+          const result = { status: 'unavailable', reason: '尚未同步外箱尺寸資料' };
+          order.packing = result;
+          results.set(order.orderId, result);
+          return;
+        }
+
+        const fittingBox = outerBoxes.find(box => tryPackOrderInBox(order.items, box));
+        if (fittingBox) {
+          const result = { status: 'recommended', box: fittingBox };
+          order.packing = result;
+          results.set(order.orderId, result);
+          return;
+        }
+
+        const oversizedModels = order.items
+          .filter(item => !outerBoxes.some(box => getAllowedOrientations(modelPackagingMap.get(normalizeKey(item.model))).some(o => o.length <= box.length && o.width <= box.width && o.height <= box.height)))
+          .map(item => item.model);
+        const reason = oversizedModels.length > 0
+          ? `單件尺寸超出所有外箱：${[...new Set(oversizedModels)].join('、')}`
+          : '所有外箱皆無法容納此訂單的完整獨立包裝排列';
+        const result = { status: 'nofit', reason };
+        order.packing = result;
+        results.set(order.orderId, result);
+      });
+      return results;
     }
 
     function setupDragAndDrop() {
@@ -1632,6 +1831,7 @@
       }
 
       applyOutstandingBalanceAdjustments(ordersMap);
+      lastPackingResults = analyzeOrdersPacking(ordersMap);
       const detailSummaryMap = buildDetailSummary(ordersMap);
       const totalItemRowsCount = Array.from(ordersMap.values())
         .reduce((count, order) => count + order.items.length, 0);
@@ -1765,6 +1965,46 @@
       return { boxes, linings };
     }
 
+    function renderSmartPackingSummary(ordersMap) {
+      const section = document.getElementById('smart-packing-section');
+      const source = document.getElementById('smart-packing-source');
+      const summary = document.getElementById('smart-packing-summary');
+      const countsEl = document.getElementById('smart-packing-box-counts');
+      const exceptionsEl = document.getElementById('smart-packing-exceptions');
+      if (!section || !source || !summary || !countsEl || !exceptionsEl) return;
+      section.classList.remove('hidden');
+
+      const results = Array.from(lastPackingResults.entries());
+      const recommended = results.filter(([, result]) => result.status === 'recommended');
+      const missing = results.filter(([, result]) => result.status === 'missing');
+      const nofit = results.filter(([, result]) => result.status === 'nofit');
+      const unavailable = results.filter(([, result]) => result.status === 'unavailable');
+      const boxCounts = new Map();
+      recommended.forEach(([, result]) => boxCounts.set(result.box.code, (boxCounts.get(result.box.code) || 0) + 1));
+
+      source.textContent = outerBoxes.length > 0 ? `已同步 ${outerBoxes.length} 種外箱內尺寸` : '外箱尺寸尚未同步';
+      source.className = outerBoxes.length > 0
+        ? 'text-[11px] font-mono px-2.5 py-1 rounded bg-emerald-50 text-emerald-700'
+        : 'text-[11px] font-mono px-2.5 py-1 rounded bg-amber-50 text-amber-700';
+
+      const metric = (label, value, color) => `<div class="rounded-lg border border-slate-200 bg-slate-50 p-3"><div class="text-[11px] text-slate-500">${label}</div><div class="mt-1 text-lg font-black font-mono ${color}">${value}</div></div>`;
+      summary.innerHTML = [
+        metric('成功推薦外箱', `${recommended.length} 筆`, 'text-emerald-700'),
+        metric('缺少尺寸資料', `${missing.length} 筆`, 'text-amber-700'),
+        metric('無合適外箱', `${nofit.length} 筆`, 'text-rose-700'),
+        metric('待同步外箱資料', `${unavailable.length} 筆`, 'text-slate-700')
+      ].join('');
+
+      countsEl.innerHTML = outerBoxes.length === 0
+        ? '<p class="p-3 text-xs text-amber-700">請先更新 Google Apps Script，使其回傳「外箱尺寸」工作表。</p>'
+        : outerBoxes.map(box => `<div class="flex items-center justify-between gap-3 p-3 text-xs"><span class="font-bold text-slate-800">${escapeHtml(box.code)} <span class="font-normal text-slate-500">${box.length} × ${box.width} × ${box.height} cm</span></span><span class="font-black font-mono text-slate-900">${boxCounts.get(box.code) || 0} 箱</span></div>`).join('');
+
+      const exceptions = [...missing, ...nofit, ...unavailable];
+      exceptionsEl.innerHTML = exceptions.length === 0
+        ? '<p class="p-3 text-xs text-emerald-700">所有訂單皆已成功推薦外箱。</p>'
+        : exceptions.map(([orderId, result]) => `<div class="p-3 text-xs"><div class="font-bold font-mono text-slate-900">${escapeHtml(orderId)}</div><p class="mt-1 ${result.status === 'missing' ? 'text-amber-700' : 'text-rose-700'}">${escapeHtml(result.reason)}</p></div>`).join('');
+    }
+
     function renderReport(ordersMap, detailSummaryMap, totalItemRows) {
       document.getElementById('empty-state').classList.add('hidden');
       document.getElementById('report-content').classList.remove('hidden');
@@ -1775,6 +2015,7 @@
       document.getElementById('stat-total-orders').textContent = `${ordersMap.size} 筆`;
       document.getElementById('stat-total-rows').textContent = `${totalItemRows} 列`;
       document.getElementById('stat-unique-details').textContent = `${detailSummaryMap.size} 款`;
+      renderSmartPackingSummary(ordersMap);
 
       const tbody = document.getElementById('logic-a-tbody');
       tbody.innerHTML = '';
@@ -1842,6 +2083,14 @@
 
         const pkg = getOrderPackagingSummary(order);
         const pkgTags = [];
+        const packing = lastPackingResults.get(order.orderId);
+        if (packing?.status === 'recommended') {
+          pkgTags.push(`🚚 外箱:${escapeHtml(packing.box.code)}`);
+        } else if (packing?.status === 'missing') {
+          pkgTags.push('⚠️ 外箱：缺少尺寸');
+        } else if (packing?.status === 'nofit') {
+          pkgTags.push('⛔ 外箱：無合適規格');
+        }
         pkg.boxes.forEach((q, name) => pkgTags.push(`📦 盒:${escapeHtml(name)}×${q}`));
         pkg.linings.forEach((q, name) => pkgTags.push(`🧩 襯:${escapeHtml(name)}×${q}`));
         const pkgHtml = pkgTags.length > 0
@@ -1965,6 +2214,7 @@
           phone: maskPhoneLastThree(order.phone),
           address: maskRecipientAddress(order.address),
           adjustment: order.adjustment,
+          packing: order.packing || null,
           pkg: getOrderPackagingSummary(order),
           items: Array.from(mergedItemsMap.values())
         });
@@ -2021,6 +2271,9 @@
       currentOrder.pkg.linings.forEach((q, name) => {
         boxBadgesEl.innerHTML += `<span class="text-xs font-bold bg-indigo-50 text-indigo-800 border border-indigo-200 px-2 py-0.5 rounded">🧩 襯：${escapeHtml(name)} ×${q}</span>`;
       });
+      if (currentOrder.packing?.status === 'recommended') {
+        boxBadgesEl.innerHTML += `<span class="text-xs font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded">🚚 外箱：${escapeHtml(currentOrder.packing.box.code)}</span>`;
+      }
 
       const adjAlert = document.getElementById('pack-adjustment-alert');
       if (currentOrder.adjustment) {
@@ -2267,7 +2520,20 @@
       } catch (e) {}
     }
 
-    // 更新相機狀態文字（結合 3 秒冷卻倒數與移開提示）
+    // 同一條碼必須在鏡頭外維持一小段時間，才解除鎖定。
+    // 計時器會在每次辨識到同一條碼時重設，因此條碼一直留在畫面內不會重複計數。
+    function scheduleHeldCodeRelease(code) {
+      if (clearAbsenceTimer) clearTimeout(clearAbsenceTimer);
+      clearAbsenceTimer = setTimeout(() => {
+        if (activeHeldCode === code) {
+          activeHeldCode = '';
+          updateCameraPromptText();
+        }
+        clearAbsenceTimer = null;
+      }, SAME_CODE_ABSENCE_MS);
+    }
+
+    // 更新相機狀態文字（結合短暫切換間隔與移開提示）
     function updateCameraPromptText() {
       const statusText = document.getElementById('camera-status-text');
       if (!statusText || !isScannerRunning) return;
@@ -2286,7 +2552,7 @@
       }
     }
 
-    // 啟動相機掃描器（16:9 視窗比例 + 每 3 秒只能掃一件 + 未移開鏡頭鎖定）
+    // 啟動相機掃描器（16:9 視窗比例 + 同碼移開後再解鎖）
     function startMobileScanner() {
       if (isScannerRunning) return;
       const statusText = document.getElementById('camera-status-text');
@@ -2318,22 +2584,16 @@
           const now = Date.now();
           const normCode = normalizeKey(decodedText);
 
-          if (clearAbsenceTimer) clearTimeout(clearAbsenceTimer);
-          clearAbsenceTimer = setTimeout(() => {
-            activeHeldCode = '';
-            updateCameraPromptText();
-          }, 800);
-
-          if (now < scanCooldownUntil) {
-            return;
-          }
-
           if (normCode === activeHeldCode) {
+            scheduleHeldCodeRelease(normCode);
             return;
           }
+
+          if (now < scanCooldownUntil) return;
 
           activeHeldCode = normCode;
-          scanCooldownUntil = now + SCAN_COOLDOWN_MS;
+          scheduleHeldCodeRelease(normCode);
+          scanCooldownUntil = now + DIFFERENT_CODE_GAP_MS;
           updateCameraPromptText();
 
           if (cooldownCountdownTimer) clearInterval(cooldownCountdownTimer);
